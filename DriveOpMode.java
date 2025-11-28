@@ -3,7 +3,10 @@ package org.firstinspires.ftc.teamcode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.VoltageSensor;
+import com.qualcomm.robotcore.util.ElapsedTime;
 import com.seattlesolvers.solverslib.drivebase.MecanumDrive;
+import com.seattlesolvers.solverslib.hardware.motors.CRServo;
 import com.seattlesolvers.solverslib.hardware.motors.Motor;
 import com.seattlesolvers.solverslib.gamepad.GamepadEx;
 
@@ -14,7 +17,8 @@ public final class DriveOpMode extends OpMode {
     private MecanumDrive drive;
     private Motor frontLeft, frontRight, backLeft, backRight;
     private Motor intakeMotor, outtakeMotor;
-    private Servo sortingServo, pushServo;
+    private Servo pushServo;
+    private CRServo sortingServo;
 
     private static final double POWER_REDUCTION = 0.5;
     private static final double SERVO_DOWN = 0.8;
@@ -26,7 +30,17 @@ public final class DriveOpMode extends OpMode {
     private long lastBurstEnd = 0;
     private static final long BURST_DURATION = 300; // ms servo spins to move one ball
     private static final long BURST_COOLDOWN = 200; // ms before next burst
-    private static final double BURST_SPEED = 0.32;  // slower than full speed
+    private static final double BURST_SPEED = 0.00;  // 0.32 slower than full speed
+
+    ElapsedTime timer = new ElapsedTime();
+    double voltage = 0.0;
+    double idealVoltage = 12.5;
+    double tunedPower = 0.3;
+
+
+    private double updateVoltage() {
+        return hardwareMap.getAll(VoltageSensor.class).iterator().next();
+    }
 
     @Override
     public void init() {
@@ -41,18 +55,20 @@ public final class DriveOpMode extends OpMode {
         drive = new MecanumDrive(frontLeft, frontRight, backLeft, backRight);
         frontRight.setInverted(true);
         backRight.setInverted(true);
-        //frontLeft.setInverted(true);
-        //backLeft.setInverted(true);
 
         intakeMotor = new Motor(hardwareMap, "intake_motor");
         outtakeMotor = new Motor(hardwareMap, "outtake_motor");
         outtakeMotor.setInverted(true);
 
-        sortingServo = hardwareMap.get(Servo.class, "sorting_servo");
+        sortingServo = hardwareMap.get(CRServo.class, "sorting_servo");
         pushServo = hardwareMap.get(Servo.class, "push_servo");
 
         pushServo.setPosition(SERVO_DOWN);
-        sortingServo.setPosition(0.5); // stop CR servo at start
+        sortingServo.set(0.5); // stop CR servo at start
+
+
+        voltage = updateVoltage();
+        timer.reset();
     }
 
     @Override
@@ -70,8 +86,8 @@ public final class DriveOpMode extends OpMode {
         double frontRightPower = (y - x - rx) / denominator * POWER_REDUCTION;
         double backRightPower  = (y + x - rx) / denominator * POWER_REDUCTION;
 
-// --- Scale right side to fix left drift ---
-        double rightCorrection = 0.97; // adjust until robot drives straight
+        //Scale right side to fix left drift ---
+        double rightCorrection = 0.955; // adjust until robot drives straight
         frontRightPower *= rightCorrection;
         backRightPower  *= rightCorrection;
 
@@ -88,12 +104,12 @@ public final class DriveOpMode extends OpMode {
 
             // Start a burst if servo is not active and cooldown passed
             if (!burstActive && System.currentTimeMillis() - lastBurstEnd >= BURST_COOLDOWN) {
-                sortingServo.setPosition(BURST_SPEED);
+                sortingServo.set(BURST_SPEED);
                 burstStartTime = System.currentTimeMillis();
                 burstActive = true;
             }
         } else if(intakeY < -0.05){
-            intakeMotor.set(-intakeY);
+            intakeMotor.set(intakeY);
         } else {
             intakeMotor.set(0);
         }
@@ -101,11 +117,23 @@ public final class DriveOpMode extends OpMode {
         // Manage burst timing
         if (burstActive) {
             if (System.currentTimeMillis() - burstStartTime >= BURST_DURATION) {
-                sortingServo.setPosition(0.5); // stop CR servo
+                sortingServo.set(0.5); // stop CR servo
                 burstActive = false;
                 lastBurstEnd = System.currentTimeMillis();
             }
         }
+
+
+
+        if (timer.seconds() >= 5) {
+            voltage = updateVoltage();
+            timer.reset();
+        }
+
+        double multiplier = voltage / idealVoltage;
+        double scaled = tunedPower * multiplier;
+        sortingServo.set(scaled);
+
 
         // --- Outtake ---
         double outtakeY = applyDeadzone(gp2.getRightY());
