@@ -3,11 +3,9 @@ package org.firstinspires.ftc.teamcode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.hardware.Servo;
-import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.util.ElapsedTime;
 import com.seattlesolvers.solverslib.drivebase.MecanumDrive;
-//import com.seattlesolvers.solverslib.hardware.motors.CRServo;
 import com.seattlesolvers.solverslib.hardware.motors.Motor;
 import com.seattlesolvers.solverslib.gamepad.GamepadEx;
 
@@ -19,63 +17,29 @@ public final class DriveOpMode extends OpMode {
     private Motor frontLeft, frontRight, backLeft, backRight;
     private Motor intakeMotor, outtakeMotor;
     private Servo pushServo;
-    private CRServo sortingServo;
+    private Servo sortingServo;
 
     private static final double POWER_REDUCTION = 0.4;
+    private static final double SERVO_DOWN = 1.0;
+    private static final double SERVO_UP = 0.6;
 
-    private static final double SERVO_DOWN = 0.8;
-    private static final double SERVO_UP = 0.45;
+    private ElapsedTime pushTimer = new ElapsedTime();
 
-    // Burst indexing variables
-    private boolean burstActive = false;
-    private long burstStartTime = 0;
-    private long lastBurstEnd = 0;
-    private static final long BURST_DURATION = 300; // ms servo spins to move one ball
-    private static final long BURST_COOLDOWN = 200; // ms before next burst
-    private static final double BURST_SPEED = 1;  // full speed
-
-    //position
-    private int currentIndex = 0;  // 0 = 0°, 1 = 120°, 2 = 240°
-    private final long sectorTime = 200;  // adjust after tuning
-    private boolean moving = false;
-    private long moveStart = 0;
-    private int targetIndex = 0;
-    private boolean xPresedLast = false;
-    private boolean yPressedLast = false;
-    private boolean aPressedLast = false;
-    private boolean bPressedLast = false;
-    private long moveStartTime = 0;
-    private long moveDuration = 0;
-
-    ElapsedTime timer = new ElapsedTime();
-    boolean timedRun = false;
+    private static final double SHOOTING_1 = 0.024;
+    private static final double SHOOTING_2 = 0.094;
+    private static final double SHOOTING_3 = 0.164;
+    private static final double INTAKE_1 = 0.06;
+    private static final double INTAKE_2 = 0.13;
+    private static final double INTAKE_3 = 0.2;
 
 
-    private void selectPosition(int target) {
-        if (moving) return;  // ignore if already moving
+    private static final double SERVO_STEP = 0.07;       // amount to move each step
+    private static final double SERVO_MIN = 0.0;         // min position
+    private static final double SERVO_MAX = 1.0;         // max position
+    private static final long SERVO_DELAY_MS = 300;      // delay between steps
 
-        targetIndex = target;
-
-        // compute difference in sectors (0,1,2)
-        int diff = targetIndex - currentIndex;
-
-        // normalize to range 0..2
-        diff = (diff + 3) % 3;
-
-        // each sector = 120° = 200 ms
-        moveDuration = diff * sectorTime;
-
-        if (moveDuration == 0) {
-            // already in position
-            return;
-        }
-
-        // direction: only spin forward
-        sortingServo.setPower(1.0);
-
-        moving = true;
-        moveStart = System.currentTimeMillis();
-    }
+    private boolean servoIncreasing = true;              // direction flag
+    private ElapsedTime servoStepTimer = new ElapsedTime(); // timer to manage steps
 
 
     @Override
@@ -91,17 +55,16 @@ public final class DriveOpMode extends OpMode {
         drive = new MecanumDrive(frontLeft, frontRight, backLeft, backRight);
         frontRight.setInverted(true);
         backRight.setInverted(true);
-        frontLeft.setInverted(true);
 
         intakeMotor = new Motor(hardwareMap, "intake_motor");
         outtakeMotor = new Motor(hardwareMap, "outtake_motor");
         outtakeMotor.setInverted(true);
 
-        sortingServo = hardwareMap.get(CRServo.class, "sorting_servo");
+        sortingServo = hardwareMap.get(Servo.class, "sorting_servo");
         pushServo = hardwareMap.get(Servo.class, "push_servo");
 
-        pushServo.setPosition(SERVO_DOWN);
-        sortingServo.setPower(0); // stop CR servo at start
+        pushServo.setPosition(1.0);
+        //sortingServo.setPosition(0);
     }
 
     @Override
@@ -111,16 +74,14 @@ public final class DriveOpMode extends OpMode {
         double x = -applyDeadzone(gp1.getLeftX());
         double y = -applyDeadzone(gp1.getLeftY());
         double rx = -applyDeadzone(gp1.getRightX());
-
         double denominator = Math.max(Math.abs(y) + Math.abs(x) + Math.abs(rx), 1);
 
         double frontLeftPower  = (y + x + rx) / denominator * POWER_REDUCTION;
-        double backLeftPower  = ((y - x + rx) / denominator) * POWER_REDUCTION * 0.97; // tweak 0.95–1.0
+        double backLeftPower   = ((y - x + rx) / denominator) * POWER_REDUCTION * 0.97;
         double frontRightPower = (y - x - rx) / denominator * POWER_REDUCTION;
         double backRightPower  = (y + x - rx) / denominator * POWER_REDUCTION;
+        double rightCorrection = 0.935;
 
-//        // Scale right side to fix left drift
-        double rightCorrection = 0.935; // adjust until robot drives straight
         frontRightPower *= rightCorrection;
         backRightPower  *= rightCorrection;
 
@@ -129,75 +90,70 @@ public final class DriveOpMode extends OpMode {
         frontRight.set(frontRightPower);
         backRight.set(backRightPower);
 
-        // --- Intake & Burst Indexing ---
-        double intakeY = applyDeadzone(gp2.getLeftY());
-        if (intakeY > 0.05) {
-            intakeMotor.set(intakeY);
 
-            // Start a burst if servo is not active and cooldown passed
-            if (!burstActive && System.currentTimeMillis() - lastBurstEnd >= BURST_COOLDOWN) {
-                sortingServo.setPower(BURST_SPEED);
-                burstStartTime = System.currentTimeMillis();
-                burstActive = true;
-            }
-        } else if(intakeY < -0.05){
-            intakeMotor.set(intakeY);
-        }
 
-        // Manage burst timing
-        if (burstActive) {
-            if (System.currentTimeMillis() - burstStartTime >= BURST_DURATION) {
-                sortingServo.setPower(0); // stop CR servo
-                burstActive = false;
-                lastBurstEnd = System.currentTimeMillis();
-            }
-        }
-
-        // ---- BUTTONS FOR POSITIONS ---- //
-        if (gamepad2.a && !aPressedLast) selectPosition(0);  // 0°
-        aPressedLast = gamepad2.a;
-
-        if (gamepad2.b && !bPressedLast) selectPosition(1);  // 120°
-        bPressedLast = gamepad2.b;
-
-        if (gamepad2.y && !yPressedLast) selectPosition(2);  // 240°
-        yPressedLast = gamepad2.y;
-
-        if ((gamepad1.a || gamepad1.b || gamepad1.y) && !timedRun) {
-            intakeMotor.set(1.0);
-            timer.reset();
-            timedRun = true;
-        }
-
-        if (timedRun && timer.seconds() > 1.0) {  // 1 second
-            intakeMotor.set(0);
-            timedRun = false;
+        // --- Sorting servo ---
+        if (gamepad2.x){
+            sortingServo.setPosition(SHOOTING_1);
+        } else if(gamepad2.y) {
+            sortingServo.setPosition(SHOOTING_2);
+        } else if(gamepad2.b) {
+            sortingServo.setPosition(SHOOTING_3);
         }
 
 
+        double intakePower = applyDeadzone(gp2.getLeftY());
+        intakeMotor.set(intakePower);
 
-// ---- MOVEMENT UPDATE ---- //
-        if (moving) {
-            if (System.currentTimeMillis() - moveStart >= moveDuration) {
-                sortingServo.setPower(0);  // stop
-                moving = false;
-                currentIndex = targetIndex;
+        if (Math.abs(intakePower) > 0) { // only move servo if intake is running
+            if (servoStepTimer.milliseconds() > SERVO_DELAY_MS) {
+                double pos = sortingServo.getPosition();
+
+                if (servoIncreasing) {
+                    pos += SERVO_STEP;
+                    if (pos >= SERVO_MAX) {
+                        pos = SERVO_MAX;
+                        servoIncreasing = false; // switch direction
+                    }
+                } else {
+                    pos -= SERVO_STEP;
+                    if (pos <= SERVO_MIN) {
+                        pos = SERVO_MIN;
+                        servoIncreasing = true; // switch direction
+                    }
+                }
+
+                sortingServo.setPosition(pos);
+                servoStepTimer.reset();
             }
         }
 
 
-        // --- Outtake ---
-        double outtakeY = applyDeadzone(gp2.getRightY());
-        outtakeMotor.set(outtakeY);
+
+
+        // --- Outtake motor ---
+        //double outtakeY = applyDeadzone(gp2.getRightY());
+        if (gamepad2.right_bumper){
+            outtakeMotor.set(0.95);
+        }
+        if (gamepad2.left_bumper) {
+            outtakeMotor.set(0.0);
+        }
+
+
+
 
         // --- Push servo ---
-        if (gamepad2.left_trigger > 0) pushServo.setPosition(SERVO_UP);
+        if (gamepad2.left_trigger > 0) {
+            pushServo.setPosition(SERVO_UP);
+            pushTimer.reset();
+        }
+        if (pushTimer.milliseconds() > 250) pushServo.setPosition(SERVO_DOWN);
         if (gamepad2.right_trigger > 0) pushServo.setPosition(SERVO_DOWN);
     }
 
 
-
     private double applyDeadzone(double value) {
-        return Math.abs(value) > 0.05 ? value : 0.0;
+        return Math.abs(value) > 0.6 ? value : 0.0;
     }
 }
